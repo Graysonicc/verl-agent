@@ -252,6 +252,22 @@ algorithm:
     mode: "mean_norm" # "mean_norm" or "mean_std_norm"
     enable_similarity: False # whether to use similarity-based anchor state grouping in GiGPO (supported for text-only tasks)
     similarity_thresh: 0.95 # similarity threshold for GiGPO (0.0, 1.0)
+  prada_lite:
+    representation: policy_hidden # policy_hidden uses actor hidden-state pooling; hashed_bow uses token HashBoW fallback
+    top_k: 16 # number of same-prompt neighbor prefixes used by the non-parametric success proxy
+    bootstrap_rounds: 16 # bootstrap resampling rounds for uncertainty estimation
+    temporal_band: 2 # only compare prefixes whose step indices differ by at most this value
+    tau: 0.2 # temperature for exp(cosine / tau) neighbor weights
+    alpha0: 1.0 # beta prior success pseudo-count
+    beta0: 1.0 # beta prior failure pseudo-count
+    lambda_u: 0.2 # coefficient for outcome-aligned uncertainty resolution in local evidence
+    trace_gamma: 0.95 # responsibility trace discount
+    trace_lambda: 0.8 # responsibility trace lambda
+    epsilon: 1e-6 # numerical stability constant
+    hash_dim: 4096 # hashed bag-of-token feature dimension for no-head prefix similarity
+    seed: 0 # deterministic bootstrap seed
+    normalize: False # optional extra normalization after the globally consistent projection
+    min_success_reward: null # if set, rewards >= this threshold are treated as successful
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10

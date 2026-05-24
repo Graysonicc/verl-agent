@@ -691,9 +691,12 @@ class ActorRolloutRefWorker(Worker):
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys, prada_prefix_embeddings = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+            output_tensors = {"old_log_probs": output, "entropys": entropys}
+            if prada_prefix_embeddings is not None:
+                output_tensors["prada_prefix_embeddings"] = prada_prefix_embeddings
             output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
+                tensors=output_tensors,
                 meta_info={"temperature": self.config.rollout.temperature},
             )
             output = self.ulysses_sharding_manager.postprocess_data(output)
@@ -733,7 +736,7 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info["use_dynamic_bsz"] = self.config.ref.log_prob_use_dynamic_bsz
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
-            output, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
+            output, _, _ = self.ref_policy.compute_log_prob(data=data, calculate_entropy=False)
             output = DataProto.from_dict(tensors={"ref_log_prob": output})
             output = self.ulysses_sharding_manager.postprocess_data(output)
 

@@ -61,6 +61,7 @@ from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
+from prada import core_prada
 
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
@@ -94,6 +95,7 @@ class AdvantageEstimator(str, Enum):
     RLOO = "rloo"
     GRPO_PASSK = "grpo_passk"
     GiGPO = 'gigpo'
+    PRADA_LITE = "prada_lite"
 
 
 @dataclass
@@ -354,9 +356,38 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             mode=gigpo_mode,
             enable_similarity=gigpo_enable_similarity,
             similarity_thresh=gigpo_similarity_thresh,
-            )
+        )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
+    elif adv_estimator == AdvantageEstimator.PRADA_LITE:
+        advantages, returns, prada_metrics = core_prada.compute_prada_lite_advantage(
+            token_level_rewards=data.batch["token_level_rewards"],
+            response_mask=data.batch["response_mask"],
+            prompts=data.batch["prompts"],
+            responses=data.batch["responses"],
+            attention_mask=data.batch["attention_mask"],
+            index=data.non_tensor_batch["uid"],
+            traj_index=data.non_tensor_batch["traj_uid"],
+            prefix_embeddings=data.batch.get("prada_prefix_embeddings", None),
+            episode_rewards=data.non_tensor_batch.get("episode_rewards", None),
+            top_k=kwargs.get("prada_top_k", 16),
+            bootstrap_rounds=kwargs.get("prada_bootstrap_rounds", 16),
+            temporal_band=kwargs.get("prada_temporal_band", 2),
+            tau=kwargs.get("prada_tau", 0.2),
+            alpha0=kwargs.get("prada_alpha0", 1.0),
+            beta0=kwargs.get("prada_beta0", 1.0),
+            lambda_u=kwargs.get("prada_lambda_u", 0.2),
+            trace_gamma=kwargs.get("prada_trace_gamma", 0.95),
+            trace_lambda=kwargs.get("prada_trace_lambda", 0.8),
+            epsilon=kwargs.get("prada_epsilon", 1e-6),
+            hash_dim=kwargs.get("prada_hash_dim", 4096),
+            seed=kwargs.get("prada_seed", 0),
+            normalize=kwargs.get("prada_normalize", False),
+            min_success_reward=kwargs.get("prada_min_success_reward", None),
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
+        data.meta_info["prada_metrics"] = prada_metrics
     else:
         raise NotImplementedError
     return data
@@ -451,7 +482,8 @@ class RayPPOTrainer:
             AdvantageEstimator.REMAX,
             AdvantageEstimator.RLOO,
             AdvantageEstimator.REINFORCE_PLUS_PLUS_BASELINE,
-            AdvantageEstimator.GiGPO
+            AdvantageEstimator.GiGPO,
+            AdvantageEstimator.PRADA_LITE,
         ]:
             self.use_critic = False
         else:
@@ -1140,7 +1172,12 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with _timer("old_log_prob", timing_raw):
+                        batch.meta_info["return_prada_prefix_embeddings"] = (
+                            self.config.algorithm.adv_estimator == AdvantageEstimator.PRADA_LITE
+                            and self.config.algorithm.prada_lite.representation == "policy_hidden"
+                        )
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        batch.meta_info.pop("return_prada_prefix_embeddings", None)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1233,7 +1270,23 @@ class RayPPOTrainer:
                             gigpo_mode=self.config.algorithm.gigpo.mode,
                             gigpo_enable_similarity= self.config.algorithm.gigpo.enable_similarity,
                             gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
+                            prada_top_k=self.config.algorithm.prada_lite.top_k,
+                            prada_bootstrap_rounds=self.config.algorithm.prada_lite.bootstrap_rounds,
+                            prada_temporal_band=self.config.algorithm.prada_lite.temporal_band,
+                            prada_tau=self.config.algorithm.prada_lite.tau,
+                            prada_alpha0=self.config.algorithm.prada_lite.alpha0,
+                            prada_beta0=self.config.algorithm.prada_lite.beta0,
+                            prada_lambda_u=self.config.algorithm.prada_lite.lambda_u,
+                            prada_trace_gamma=self.config.algorithm.prada_lite.trace_gamma,
+                            prada_trace_lambda=self.config.algorithm.prada_lite.trace_lambda,
+                            prada_epsilon=self.config.algorithm.prada_lite.epsilon,
+                            prada_hash_dim=self.config.algorithm.prada_lite.hash_dim,
+                            prada_seed=self.config.algorithm.prada_lite.seed,
+                            prada_normalize=self.config.algorithm.prada_lite.normalize,
+                            prada_min_success_reward=self.config.algorithm.prada_lite.min_success_reward,
                         )
+                        if "prada_metrics" in batch.meta_info:
+                            metrics.update(batch.meta_info.pop("prada_metrics"))
 
                     # update critic
                     if self.use_critic:

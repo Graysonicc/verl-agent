@@ -21,6 +21,7 @@ import itertools
 import time
 import logging
 import os
+import inspect
 from typing import Tuple
 
 import torch
@@ -72,8 +73,28 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
         self.device_name = get_device_name()
+        self._forward_accepts_output_hidden_states = self._supports_forward_kwarg("output_hidden_states")
 
-    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _supports_forward_kwarg(self, kwarg_name: str) -> bool:
+        module = self.actor_module
+        if isinstance(module, FSDP):
+            module = module.module
+        try:
+            signature = inspect.signature(module.forward)
+        except (TypeError, ValueError):
+            return False
+        if kwarg_name in signature.parameters:
+            return True
+        return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+    def _pool_hidden_states(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.float()
+        mask = attention_mask.to(hidden_states.device).bool()
+        denom = mask.sum(dim=-1, keepdim=True).clamp_min(1)
+        pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=1) / denom
+        return torch.nn.functional.normalize(pooled, p=2, dim=-1)
+
+    def _forward_micro_batch(self, micro_batch, temperature, calculate_entropy=False, return_hidden_states=False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
@@ -94,6 +115,7 @@ class DataParallelPPOActor(BasePPOActor):
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
 
+            prefix_embeddings = None
             if self.use_remove_padding:
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
@@ -135,6 +157,10 @@ class DataParallelPPOActor(BasePPOActor):
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
+                    extra_args["return_dict"] = True
+                request_hidden_states = return_hidden_states and self._forward_accepts_output_hidden_states
+                if request_hidden_states:
+                    extra_args["output_hidden_states"] = True
                     extra_args["return_dict"] = True
 
                 output = self.actor_module(
@@ -184,6 +210,22 @@ class DataParallelPPOActor(BasePPOActor):
                             padding_size=pad_size,
                         )
                 # pad back to (bsz, seqlen)
+                if request_hidden_states and hasattr(output, "hidden_states") and output.hidden_states is not None:
+                    hidden_rmpad = output.hidden_states[-1].squeeze(0)
+                    if self.use_ulysses_sp:
+                        hidden_rmpad = gather_outpus_and_unpad(
+                            hidden_rmpad,
+                            gather_dim=0,
+                            unpad_dim=0,
+                            padding_size=pad_size,
+                        )
+                    full_hidden = pad_input(
+                        hidden_states=hidden_rmpad,
+                        indices=indices,
+                        batch=batch_size,
+                        seqlen=seqlen,
+                    )
+                    prefix_embeddings = self._pool_hidden_states(full_hidden, attention_mask)
                 if calculate_entropy:
                     full_entropy = pad_input(
                         hidden_states=entropy_rmpad.unsqueeze(-1),
@@ -207,6 +249,10 @@ class DataParallelPPOActor(BasePPOActor):
                 extra_args = {}
                 if self.use_fused_kernels:
                     extra_args["temperature"] = temperature
+                request_hidden_states = return_hidden_states and self._forward_accepts_output_hidden_states
+                if request_hidden_states:
+                    extra_args["output_hidden_states"] = True
+                    extra_args["return_dict"] = True
                 output = self.actor_module(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -228,8 +274,10 @@ class DataParallelPPOActor(BasePPOActor):
                     log_probs = logprobs_from_logits(logits, micro_batch["responses"])
                     if calculate_entropy:
                         entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
+                if request_hidden_states and hasattr(output, "hidden_states") and output.hidden_states is not None:
+                    prefix_embeddings = self._pool_hidden_states(output.hidden_states[-1], attention_mask)
 
-            return entropy, log_probs
+            return entropy, log_probs, prefix_embeddings
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -274,6 +322,7 @@ class DataParallelPPOActor(BasePPOActor):
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        return_hidden_states = data.meta_info.get("return_prada_prefix_embeddings", False)
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
         batch = data.select(batch_keys=select_keys).batch
@@ -292,26 +341,39 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
+        prefix_embedding_lst = []
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(micro_batch, temperature=temperature, calculate_entropy=calculate_entropy)
+                entropy, log_probs, prefix_embeddings = self._forward_micro_batch(
+                    micro_batch,
+                    temperature=temperature,
+                    calculate_entropy=calculate_entropy,
+                    return_hidden_states=return_hidden_states,
+                )
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
+            if return_hidden_states and prefix_embeddings is not None:
+                prefix_embedding_lst.append(prefix_embeddings)
 
         log_probs = torch.concat(log_probs_lst, dim=0)
         entropys = None
         if calculate_entropy:
             entropys = torch.concat(entropy_lst, dim=0)
+        prefix_embeddings = None
+        if return_hidden_states and len(prefix_embedding_lst) == len(log_probs_lst):
+            prefix_embeddings = torch.concat(prefix_embedding_lst, dim=0)
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             log_probs = log_probs[revert_indices]
+            if prefix_embeddings is not None:
+                prefix_embeddings = prefix_embeddings[revert_indices]
 
-        return log_probs, entropys
+        return log_probs, entropys, prefix_embeddings
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
@@ -385,7 +447,7 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
+                    entropy, log_prob, _ = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
                     
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     if loss_mode == "vanilla":
