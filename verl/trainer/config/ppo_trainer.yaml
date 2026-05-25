@@ -269,7 +269,7 @@ algorithm:
     normalize: False # optional extra normalization after the globally consistent projection
     min_success_reward: null # if set, rewards >= this threshold are treated as successful
     exclude_same_traj: True # leave-one-trajectory-out neighbors reduce terminal-label leakage into each step
-    responsibility_mix: 0.3 # 0 falls back to trajectory-level GRPO-style advantages; 1 uses full PRADA-lite projection
+    responsibility_mix: 1.0 # 0 falls back to trajectory-level GRPO-style advantages; 1 uses full PRADA-lite projection
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10
