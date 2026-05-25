@@ -1,12 +1,16 @@
 set -x
 ENGINE=${1:-vllm}
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
 
-train_data_size=16
+train_data_size=16  # 16
 val_data_size=128
 group_size=8
+gpu_nums=4
+epoch=150
+
+experiment_name="prada_qwen2.5_7b_instrcut_gpu${gpu_nums}_bs${train_data_size}_ep${epoch}_rlot${group_size}_ep${epoch}"
 
 # We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
@@ -15,7 +19,7 @@ python3 -m examples.data_preprocess.prepare \
     --val_data_size $val_data_size
 
 python3 -m verl.trainer.main_ppo \
-    algorithm.adv_estimator=grpo \
+    algorithm.adv_estimator=prada_lite \
     data.train_files=$HOME/data/verl-agent/text/train.parquet \
     data.val_files=$HOME/data/verl-agent/text/test.parquet \
     data.train_batch_size=$train_data_size \
@@ -25,7 +29,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=Qwen/Qwen2.5-1.5B-Instruct \
+    actor_rollout_ref.model.path=/mnt/workspace/gaolei.296/mymodel/Qwen2.5-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -58,10 +62,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name='verl_agent_alfworld' \
-    trainer.experiment_name='grpo_qwen2.5_1.5b' \
-    trainer.n_gpus_per_node=2 \
+    trainer.experiment_name=$experiment_name \
+    trainer.n_gpus_per_node=$gpu_nums \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
-    trainer.total_epochs=150 \
-    trainer.val_before_train=True $@
+    trainer.total_epochs=$epoch \
+    trainer.val_before_train=False $@
