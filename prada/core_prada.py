@@ -26,6 +26,8 @@ class PradaLiteConfig:
     seed: int = 0
     normalize: bool = False
     min_success_reward: Optional[float] = None
+    exclude_same_traj: bool = True
+    responsibility_mix: float = 0.3
 
 
 def _as_float_array(values: Iterable, name: str) -> np.ndarray:
@@ -174,6 +176,7 @@ def _local_success_proxy(
     responses: torch.Tensor,
     attention_mask: torch.Tensor,
     group_index: np.ndarray,
+    traj_index: np.ndarray,
     traj_steps: np.ndarray,
     success: np.ndarray,
     cfg: PradaLiteConfig,
@@ -200,7 +203,15 @@ def _local_success_proxy(
                 int(col)
                 for col in group_idx
                 if abs(int(traj_steps[col]) - int(traj_steps[row])) <= cfg.temporal_band
+                and (not cfg.exclude_same_traj or traj_index[col] != traj_index[row])
             ]
+            if len(candidates) == 0:
+                candidates = [
+                    int(col)
+                    for col in group_idx
+                    if abs(int(traj_steps[col]) - int(traj_steps[row])) <= cfg.temporal_band
+                    and col != row
+                ]
             scored: list[tuple[float, int]] = []
             for col in candidates:
                 if dense_features is not None:
@@ -300,6 +311,8 @@ def compute_prada_lite_advantage(
     seed: int = 0,
     normalize: bool = False,
     min_success_reward: Optional[float] = None,
+    exclude_same_traj: bool = True,
+    responsibility_mix: float = 0.3,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """
     Compute PRADA-lite step advantages.
@@ -310,6 +323,7 @@ def compute_prada_lite_advantage(
     - Local evidence: e_t = logit(p_t) - logit(p_{t-1}) + lambda_u sign(A_grp) (v_{t-1} - v_t)
     - Trace smoothing: ebar_t = sum_u (trace_gamma trace_lambda)^(u-t) e_u
     - Projection: A_t = ebar_t + w_t * (T A_grp - sum_u ebar_u) / sum_u w_u
+    - Conservative anchoring: final A_t = A_grp + mix * (A_t - A_grp)
     """
     if token_level_rewards.ndim != 2 or response_mask.ndim != 2:
         raise ValueError("PRADA-lite expects token_level_rewards and response_mask to be rank-2 tensors.")
@@ -331,6 +345,8 @@ def compute_prada_lite_advantage(
         seed=seed,
         normalize=normalize,
         min_success_reward=min_success_reward,
+        exclude_same_traj=exclude_same_traj,
+        responsibility_mix=responsibility_mix,
     )
 
     index = np.asarray(index, dtype=object)
@@ -356,6 +372,7 @@ def compute_prada_lite_advantage(
         responses=responses,
         attention_mask=attention_mask,
         group_index=index,
+        traj_index=traj_index,
         traj_steps=traj_steps,
         success=success,
         cfg=cfg,
@@ -374,6 +391,8 @@ def compute_prada_lite_advantage(
     smoothed = _trace_smooth(evidence, traj_index, trace_decay)
     uncertainty_weight = variance + cfg.epsilon
     projected = _closed_form_projection(smoothed, uncertainty_weight, group_adv, traj_index, cfg.epsilon)
+    mix = float(np.clip(cfg.responsibility_mix, 0.0, 1.0))
+    projected = group_adv + mix * (projected - group_adv)
     if cfg.normalize:
         projected = _normalize_within_prompt_group(projected, index, cfg.epsilon)
 
@@ -386,6 +405,8 @@ def compute_prada_lite_advantage(
         "prada_lite/effective_neighbors_mean": float(np.mean(effective_k)),
         "prada_lite/used_policy_hidden_embeddings": float(prefix_embeddings is not None),
         "prada_lite/evidence_mean": float(np.mean(evidence)),
+        "prada_lite/responsibility_residual_std": float(np.std(projected - group_adv)),
+        "prada_lite/responsibility_mix": mix,
         "prada_lite/projected_step_adv_mean": float(np.mean(projected)),
         "prada_lite/global_consistency_error": float(
             np.mean(
