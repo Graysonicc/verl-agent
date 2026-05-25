@@ -9,8 +9,10 @@ val_data_size=128
 group_size=8
 gpu_nums=4
 epoch=150
+trace_lambda=0.95
+responsibility_mix=0.5
 
-experiment_name="prada_qwen2.5_7b_instrcut_gpu${gpu_nums}_bs${train_data_size}_ep${epoch}_rlot${group_size}_ep${epoch}"
+experiment_name="prada_qwen2.5_7b_instrcut_gpu${gpu_nums}_bs${train_data_size}_ep${epoch}_rlot${group_size}_ep${epoch}_lam${trace_lambda}_mix${responsibility_mix}"
 
 # We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
@@ -20,6 +22,8 @@ python3 -m examples.data_preprocess.prepare \
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=prada_lite \
+    algorithm.prada_lite.trace_lambda=$trace_lambda \
+    algorithm.prada_lite.responsibility_mix=$responsibility_mix \
     data.train_files=$HOME/data/verl-agent/text/train.parquet \
     data.val_files=$HOME/data/verl-agent/text/test.parquet \
     data.train_batch_size=$train_data_size \
