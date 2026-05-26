@@ -271,6 +271,9 @@ algorithm:
     exclude_same_traj: True # leave-one-trajectory-out neighbors reduce terminal-label leakage into each step
     responsibility_mix: 1.0 # 0 falls back to trajectory-level GRPO-style advantages; 1 uses full PRADA-lite projection
     residual_clip: 2.0 # max per-trajectory absolute local residual; scales residuals instead of hard clipping to preserve consistency
+    assignment_mode: responsibility_weighted # projection or responsibility_weighted
+    responsibility_temperature: 1.0 # lower values make responsibility weights sharper
+    responsibility_weight_clip: 3.0 # soft cap for per-step responsibility weights before renormalization; null disables
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10

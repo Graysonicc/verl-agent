@@ -387,6 +387,9 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             exclude_same_traj=kwargs.get("prada_exclude_same_traj", True),
             responsibility_mix=kwargs.get("prada_responsibility_mix", 0.3),
             residual_clip=kwargs.get("prada_residual_clip", 2.0),
+            assignment_mode=kwargs.get("prada_assignment_mode", "projection"),
+            responsibility_temperature=kwargs.get("prada_responsibility_temperature", 1.0),
+            responsibility_weight_clip=kwargs.get("prada_responsibility_weight_clip", 3.0),
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1290,6 +1293,9 @@ class RayPPOTrainer:
                             prada_exclude_same_traj=self.config.algorithm.prada_lite.exclude_same_traj,
                             prada_responsibility_mix=self.config.algorithm.prada_lite.responsibility_mix,
                             prada_residual_clip=self.config.algorithm.prada_lite.residual_clip,
+                            prada_assignment_mode=self.config.algorithm.prada_lite.assignment_mode,
+                            prada_responsibility_temperature=self.config.algorithm.prada_lite.responsibility_temperature,
+                            prada_responsibility_weight_clip=self.config.algorithm.prada_lite.responsibility_weight_clip,
                         )
                         if "prada_metrics" in batch.meta_info:
                             metrics.update(batch.meta_info.pop("prada_metrics"))

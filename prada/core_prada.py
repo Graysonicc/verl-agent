@@ -29,6 +29,9 @@ class PradaLiteConfig:
     exclude_same_traj: bool = True
     responsibility_mix: float = 0.3
     residual_clip: Optional[float] = 2.0
+    assignment_mode: str = "projection"
+    responsibility_temperature: float = 1.0
+    responsibility_weight_clip: Optional[float] = 3.0
 
 
 def _as_float_array(values: Iterable, name: str) -> np.ndarray:
@@ -308,6 +311,33 @@ def _scale_residual_by_trajectory(
     return scaled
 
 
+def _responsibility_weights(
+    aligned_evidence: np.ndarray,
+    traj_index: np.ndarray,
+    temperature: float,
+    weight_clip: Optional[float],
+    epsilon: float,
+) -> np.ndarray:
+    weights = np.ones_like(aligned_evidence, dtype=np.float32)
+    temp = max(float(temperature), epsilon)
+    clip = None if weight_clip is None else float(weight_clip)
+    for traj_uid in np.unique(traj_index):
+        idx = np.where(traj_index == traj_uid)[0]
+        if len(idx) <= 1:
+            continue
+        scores = aligned_evidence[idx].astype(np.float64) / temp
+        scores = scores - float(np.max(scores))
+        local_weights = np.exp(np.clip(scores, -50.0, 50.0))
+        if not np.isfinite(local_weights).all() or local_weights.sum() <= 0.0:
+            local_weights = np.ones_like(local_weights)
+        local_weights = local_weights / max(float(np.mean(local_weights)), epsilon)
+        if clip is not None and clip > 0.0:
+            local_weights = np.minimum(local_weights, clip)
+            local_weights = local_weights / max(float(np.mean(local_weights)), epsilon)
+        weights[idx] = local_weights.astype(np.float32)
+    return weights
+
+
 def compute_prada_lite_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -335,6 +365,9 @@ def compute_prada_lite_advantage(
     exclude_same_traj: bool = True,
     responsibility_mix: float = 0.3,
     residual_clip: Optional[float] = 2.0,
+    assignment_mode: str = "projection",
+    responsibility_temperature: float = 1.0,
+    responsibility_weight_clip: Optional[float] = 3.0,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """
     Compute PRADA-lite step advantages.
@@ -344,7 +377,8 @@ def compute_prada_lite_advantage(
     - Bootstrap success proxy: p_hat = (alpha0 + sum omega R) / (alpha0 + beta0 + sum omega)
     - Local evidence: e_t = logit(p_t) - logit(p_{t-1}) + lambda_u sign(A_grp) (v_{t-1} - v_t)
     - Trace smoothing: ebar_t = sum_u (trace_gamma trace_lambda)^(u-t) e_u
-    - Projection: A_t = ebar_t + w_t * (T A_grp - sum_u ebar_u) / sum_u w_u
+    - Projection mode: A_t = ebar_t + w_t * (T A_grp - sum_u ebar_u) / sum_u w_u
+    - Responsibility-weighted mode: A_t = A_grp * softmax(sign(A_grp) * ebar_t)
     - Conservative anchoring: final A_t = A_grp + mix * scaled(A_t - A_grp)
     """
     if token_level_rewards.ndim != 2 or response_mask.ndim != 2:
@@ -370,6 +404,9 @@ def compute_prada_lite_advantage(
         exclude_same_traj=exclude_same_traj,
         responsibility_mix=responsibility_mix,
         residual_clip=residual_clip,
+        assignment_mode=assignment_mode,
+        responsibility_temperature=responsibility_temperature,
+        responsibility_weight_clip=responsibility_weight_clip,
     )
 
     index = np.asarray(index, dtype=object)
@@ -412,8 +449,21 @@ def compute_prada_lite_advantage(
 
     trace_decay = cfg.trace_gamma * cfg.trace_lambda
     smoothed = _trace_smooth(evidence, traj_index, trace_decay)
-    uncertainty_weight = variance + cfg.epsilon
-    projected = _closed_form_projection(smoothed, uncertainty_weight, group_adv, traj_index, cfg.epsilon)
+    responsibility_weights = np.ones_like(group_adv, dtype=np.float32)
+    assignment_mode = str(cfg.assignment_mode).lower()
+    if assignment_mode == "responsibility_weighted":
+        aligned_evidence = np.sign(group_adv) * smoothed
+        responsibility_weights = _responsibility_weights(
+            aligned_evidence=aligned_evidence,
+            traj_index=traj_index,
+            temperature=cfg.responsibility_temperature,
+            weight_clip=cfg.responsibility_weight_clip,
+            epsilon=cfg.epsilon,
+        )
+        projected = group_adv * responsibility_weights
+    else:
+        uncertainty_weight = variance + cfg.epsilon
+        projected = _closed_form_projection(smoothed, uncertainty_weight, group_adv, traj_index, cfg.epsilon)
     mix = float(np.clip(cfg.responsibility_mix, 0.0, 1.0))
     raw_residual = projected - group_adv
     scaled_residual = _scale_residual_by_trajectory(raw_residual, traj_index, cfg.residual_clip, cfg.epsilon)
@@ -435,6 +485,10 @@ def compute_prada_lite_advantage(
         "prada_lite/scaled_residual_abs_max": float(np.max(np.abs(scaled_residual))) if scaled_residual.size else 0.0,
         "prada_lite/residual_clip": float(cfg.residual_clip if cfg.residual_clip is not None else -1.0),
         "prada_lite/responsibility_mix": mix,
+        "prada_lite/assignment_mode_responsibility_weighted": float(assignment_mode == "responsibility_weighted"),
+        "prada_lite/responsibility_weight_mean": float(np.mean(responsibility_weights)),
+        "prada_lite/responsibility_weight_std": float(np.std(responsibility_weights)),
+        "prada_lite/responsibility_weight_max": float(np.max(responsibility_weights)) if responsibility_weights.size else 0.0,
         "prada_lite/projected_step_adv_mean": float(np.mean(projected)),
         "prada_lite/global_consistency_error": float(
             np.mean(
