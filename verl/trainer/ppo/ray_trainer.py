@@ -386,6 +386,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             min_success_reward=kwargs.get("prada_min_success_reward", None),
             exclude_same_traj=kwargs.get("prada_exclude_same_traj", True),
             responsibility_mix=kwargs.get("prada_responsibility_mix", 0.3),
+            residual_clip=kwargs.get("prada_residual_clip", 2.0),
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1288,6 +1289,7 @@ class RayPPOTrainer:
                             prada_min_success_reward=self.config.algorithm.prada_lite.min_success_reward,
                             prada_exclude_same_traj=self.config.algorithm.prada_lite.exclude_same_traj,
                             prada_responsibility_mix=self.config.algorithm.prada_lite.responsibility_mix,
+                            prada_residual_clip=self.config.algorithm.prada_lite.residual_clip,
                         )
                         if "prada_metrics" in batch.meta_info:
                             metrics.update(batch.meta_info.pop("prada_metrics"))

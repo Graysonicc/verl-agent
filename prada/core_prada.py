@@ -28,6 +28,7 @@ class PradaLiteConfig:
     min_success_reward: Optional[float] = None
     exclude_same_traj: bool = True
     responsibility_mix: float = 0.3
+    residual_clip: Optional[float] = 2.0
 
 
 def _as_float_array(values: Iterable, name: str) -> np.ndarray:
@@ -287,6 +288,26 @@ def _normalize_within_prompt_group(
     return normalized
 
 
+def _scale_residual_by_trajectory(
+    residual: np.ndarray,
+    traj_index: np.ndarray,
+    max_abs: Optional[float],
+    epsilon: float,
+) -> np.ndarray:
+    if max_abs is None or float(max_abs) <= 0.0:
+        return residual
+    scaled = residual.copy()
+    cap = float(max_abs)
+    for traj_uid in np.unique(traj_index):
+        idx = np.where(traj_index == traj_uid)[0]
+        if len(idx) == 0:
+            continue
+        traj_max = float(np.max(np.abs(scaled[idx])))
+        if traj_max > cap:
+            scaled[idx] *= cap / max(traj_max, epsilon)
+    return scaled
+
+
 def compute_prada_lite_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
@@ -313,6 +334,7 @@ def compute_prada_lite_advantage(
     min_success_reward: Optional[float] = None,
     exclude_same_traj: bool = True,
     responsibility_mix: float = 0.3,
+    residual_clip: Optional[float] = 2.0,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """
     Compute PRADA-lite step advantages.
@@ -323,7 +345,7 @@ def compute_prada_lite_advantage(
     - Local evidence: e_t = logit(p_t) - logit(p_{t-1}) + lambda_u sign(A_grp) (v_{t-1} - v_t)
     - Trace smoothing: ebar_t = sum_u (trace_gamma trace_lambda)^(u-t) e_u
     - Projection: A_t = ebar_t + w_t * (T A_grp - sum_u ebar_u) / sum_u w_u
-    - Conservative anchoring: final A_t = A_grp + mix * (A_t - A_grp)
+    - Conservative anchoring: final A_t = A_grp + mix * scaled(A_t - A_grp)
     """
     if token_level_rewards.ndim != 2 or response_mask.ndim != 2:
         raise ValueError("PRADA-lite expects token_level_rewards and response_mask to be rank-2 tensors.")
@@ -347,6 +369,7 @@ def compute_prada_lite_advantage(
         min_success_reward=min_success_reward,
         exclude_same_traj=exclude_same_traj,
         responsibility_mix=responsibility_mix,
+        residual_clip=residual_clip,
     )
 
     index = np.asarray(index, dtype=object)
@@ -392,7 +415,9 @@ def compute_prada_lite_advantage(
     uncertainty_weight = variance + cfg.epsilon
     projected = _closed_form_projection(smoothed, uncertainty_weight, group_adv, traj_index, cfg.epsilon)
     mix = float(np.clip(cfg.responsibility_mix, 0.0, 1.0))
-    projected = group_adv + mix * (projected - group_adv)
+    raw_residual = projected - group_adv
+    scaled_residual = _scale_residual_by_trajectory(raw_residual, traj_index, cfg.residual_clip, cfg.epsilon)
+    projected = group_adv + mix * scaled_residual
     if cfg.normalize:
         projected = _normalize_within_prompt_group(projected, index, cfg.epsilon)
 
@@ -406,6 +431,9 @@ def compute_prada_lite_advantage(
         "prada_lite/used_policy_hidden_embeddings": float(prefix_embeddings is not None),
         "prada_lite/evidence_mean": float(np.mean(evidence)),
         "prada_lite/responsibility_residual_std": float(np.std(projected - group_adv)),
+        "prada_lite/raw_residual_abs_max": float(np.max(np.abs(raw_residual))) if raw_residual.size else 0.0,
+        "prada_lite/scaled_residual_abs_max": float(np.max(np.abs(scaled_residual))) if scaled_residual.size else 0.0,
+        "prada_lite/residual_clip": float(cfg.residual_clip if cfg.residual_clip is not None else -1.0),
         "prada_lite/responsibility_mix": mix,
         "prada_lite/projected_step_adv_mean": float(np.mean(projected)),
         "prada_lite/global_consistency_error": float(

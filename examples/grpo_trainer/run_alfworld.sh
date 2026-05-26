@@ -9,10 +9,13 @@ val_data_size=128
 group_size=8
 gpu_nums=4
 epoch=150
-trace_lambda=0.95
-responsibility_mix=0.5
+trace_lambda=0.0
+responsibility_mix=0.5  # 先确定
+top_k=8  # 先确定
+temporal_band=4
+lambda_u=0.0
 
-experiment_name="prada_qwen2.5_7b_instrcut_gpu${gpu_nums}_bs${train_data_size}_ep${epoch}_rlot${group_size}_ep${epoch}_lam${trace_lambda}_mix${responsibility_mix}"
+experiment_name="exc_prada_qwen2.5_7b_instrcut_gpu${gpu_nums}_bs${train_data_size}_ep${epoch}_rlot${group_size}_ep${epoch}_lam${trace_lambda}_mix${responsibility_mix}_k${top_k}_band${temporal_band}_u${lambda_u}_5_26"
 
 # We only use data preparation to indicate the modality and the data size.
 python3 -m examples.data_preprocess.prepare \
@@ -24,6 +27,11 @@ python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=prada_lite \
     algorithm.prada_lite.trace_lambda=$trace_lambda \
     algorithm.prada_lite.responsibility_mix=$responsibility_mix \
+    algorithm.prada_lite.top_k=$top_k \
+    algorithm.prada_lite.lambda_u=$lambda_u \
+    algorithm.prada_lite.temporal_band=$temporal_band \
+    algorithm.prada_lite.exclude_same_traj=True \
+    algorithm.prada_lite.normalize=False \
     data.train_files=$HOME/data/verl-agent/text/train.parquet \
     data.val_files=$HOME/data/verl-agent/text/test.parquet \
     data.train_batch_size=$train_data_size \
