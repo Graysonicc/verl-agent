@@ -166,7 +166,7 @@ def _build_prefix_features(
     for i in range(prompts.size(0)):
         prompt_mask = attention_mask[i, :prompt_len] if attention_mask is not None else None
         response_mask = attention_mask[i, prompt_len:] if attention_mask is not None else None
-        tokens = _valid_token_list(prompts[i], prompt_mask)
+        tokens = _valid_token_list(prompts[i], prompt_mask, max_items=256)
         tokens += _valid_token_list(responses[i], response_mask, max_items=128)
         features.append(_hashed_bow(tokens, hash_dim))
     return features

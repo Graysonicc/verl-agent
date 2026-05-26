@@ -87,9 +87,19 @@ class DataParallelPPOActor(BasePPOActor):
             return True
         return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
 
-    def _pool_hidden_states(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def _pool_hidden_states(self, hidden_states: torch.Tensor, attention_mask: torch.Tensor, response_length: int) -> torch.Tensor:
         hidden_states = hidden_states.float()
         mask = attention_mask.to(hidden_states.device).bool()
+        if response_length > 0 and mask.size(1) > response_length:
+            prompt_length = mask.size(1) - response_length
+            local_mask = torch.zeros_like(mask)
+            local_mask[:, prompt_length:] = mask[:, prompt_length:]
+            for row in range(mask.size(0)):
+                valid_prompt = torch.where(mask[row, :prompt_length])[0]
+                if valid_prompt.numel() > 0:
+                    start = int(valid_prompt[max(valid_prompt.numel() - 256, 0)])
+                    local_mask[row, start:prompt_length] = mask[row, start:prompt_length]
+            mask = local_mask
         denom = mask.sum(dim=-1, keepdim=True).clamp_min(1)
         pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=1) / denom
         return torch.nn.functional.normalize(pooled, p=2, dim=-1)
@@ -225,7 +235,7 @@ class DataParallelPPOActor(BasePPOActor):
                         batch=batch_size,
                         seqlen=seqlen,
                     )
-                    prefix_embeddings = self._pool_hidden_states(full_hidden, attention_mask)
+                    prefix_embeddings = self._pool_hidden_states(full_hidden, attention_mask, response_length)
                 if calculate_entropy:
                     full_entropy = pad_input(
                         hidden_states=entropy_rmpad.unsqueeze(-1),
@@ -275,7 +285,7 @@ class DataParallelPPOActor(BasePPOActor):
                     if calculate_entropy:
                         entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
                 if request_hidden_states and hasattr(output, "hidden_states") and output.hidden_states is not None:
-                    prefix_embeddings = self._pool_hidden_states(output.hidden_states[-1], attention_mask)
+                    prefix_embeddings = self._pool_hidden_states(output.hidden_states[-1], attention_mask, response_length)
 
             return entropy, log_probs, prefix_embeddings
 
