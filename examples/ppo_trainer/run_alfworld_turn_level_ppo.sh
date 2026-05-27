@@ -4,7 +4,7 @@ export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 num_cpus_per_env_worker=0.1
 
-train_data_size=128
+train_data_size=64
 val_data_size=128
 
 # Data preparation (text modality)
@@ -34,7 +34,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=/mnt/workspace/gaolei.296/mymodel/Qwen2.5-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=256 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.clip_ratio_high=0.28 \
@@ -67,7 +67,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','tensorboard'] \
     trainer.project_name='verl_agent_alfworld' \
-    trainer.experiment_name='turn_level_ppo_qwen2.5_7b_v0_5_27' \
+    trainer.experiment_name='turn_level_ppo_qwen2.5_7b_v0_tiny_5_27' \
     trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
