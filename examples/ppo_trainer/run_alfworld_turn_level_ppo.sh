@@ -1,6 +1,6 @@
 set -x
 ENGINE=${1:-vllm}
-export VLLM_ATTENTION_BACKEND=XFORMERS
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 num_cpus_per_env_worker=0.1
 
