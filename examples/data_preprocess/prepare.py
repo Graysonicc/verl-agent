@@ -40,7 +40,7 @@ if __name__ == '__main__':
     See details: https://github.com/langfengQ/verl-agent?tab=readme-ov-file#2-data-preparation
     """
 
-    dataset = datasets.load_dataset(data_source)
+    dataset = datasets.load_dataset("/mnt/workspace/gaolei.296/mydata/geometry3k")
 
     train_dataset = dataset['train'].select(range(args.train_data_size))
     test_dataset = dataset['test'].select(range(args.val_data_size))

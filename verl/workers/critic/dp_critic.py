@@ -55,6 +55,8 @@ class DataParallelPPOCritic(BasePPOCritic):
         print(f"Critic use_remove_padding={self.use_remove_padding}")
 
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
+        self.turn_level = self.config.get("turn_level", False)
+        self.turn_level_critic_loss_mode = self.config.get("turn_level_critic_loss_mode", "turn_only")
         self.device_name = get_device_name()
 
     def _forward_micro_batch(self, micro_batch):
@@ -78,8 +80,7 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                 # unpad the position_ids to align the rotary
                 if position_ids.dim() == 3:
-                    position_ids_rmpad =
-                    index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices).transpose(0, 1).unsqueeze(1)  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
+                    position_ids_rmpad = index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices).transpose(0, 1).unsqueeze(1)  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
                 else:
                     position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
 
@@ -116,6 +117,16 @@ class DataParallelPPOCritic(BasePPOCritic):
                 values = output.logits
                 values = values[:, -response_length - 1 : -1].squeeze(-1)
             return values
+
+    def _apply_turn_level_values(self, values, response_mask):
+        """Extract last-valid-token value and broadcast to all tokens in the turn."""
+        valid_lengths = response_mask.sum(dim=-1).long()  # (bs,)
+        batch_size = values.shape[0]
+        turn_values = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
+        for i in range(batch_size):
+            if valid_lengths[i] > 0:
+                turn_values[i] = values[i, valid_lengths[i] - 1]
+        return turn_values.unsqueeze(-1).expand_as(values) * response_mask
 
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
@@ -174,6 +185,11 @@ class DataParallelPPOCritic(BasePPOCritic):
             revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
             values = values[revert_indices]
         values = values * attention_mask[:, -response_length - 1 : -1]
+
+        if self.turn_level:
+            response_mask = attention_mask[:, -response_length - 1 : -1]
+            values = self._apply_turn_level_values(values, response_mask)
+
         return values
 
     @GPUMemoryLogger(role="dp critic", logger=logger)
@@ -227,13 +243,24 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                     vpreds = self._forward_micro_batch(data)
 
+                    # For turn-level critic, only compute loss at last valid token
+                    if self.turn_level and self.turn_level_critic_loss_mode == "turn_only":
+                        valid_lengths = response_mask.sum(dim=-1).long()
+                        turn_mask = torch.zeros_like(response_mask)
+                        for i in range(response_mask.shape[0]):
+                            if valid_lengths[i] > 0:
+                                turn_mask[i, valid_lengths[i] - 1] = 1.0
+                        loss_mask = turn_mask
+                    else:
+                        loss_mask = response_mask
+
                     # assert not torch.any(torch.isnan(vpreds)).item()
 
                     vf_loss, vf_clipfrac = core_algos.compute_value_loss(
                         vpreds=vpreds,
                         values=values,
                         returns=returns,
-                        response_mask=response_mask,
+                        response_mask=loss_mask,
                         cliprange_value=self.config.cliprange_value,
                         loss_agg_mode=self.config.loss_agg_mode,
                     )

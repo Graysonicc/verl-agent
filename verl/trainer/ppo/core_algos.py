@@ -109,6 +109,78 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
+def compute_turn_level_gae(
+    token_level_rewards: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    traj_uids: np.ndarray,
+    gamma: float = 1.0,
+    lam: float = 1.0,
+):
+    """Compute turn-level GAE advantage and returns, then broadcast to token level.
+
+    Each row in the batch represents one turn. Turns belonging to the same episode
+    share the same traj_uid. GAE is computed across turns within each episode, then
+    the per-turn advantage/return is broadcast to all tokens in that turn.
+
+    Args:
+        token_level_rewards: (bs, response_length) — reward placed at last valid token per turn
+        values: (bs, response_length) — turn-level values already broadcast to all tokens
+        response_mask: (bs, response_length)
+        traj_uids: (bs,) — episode identifier per turn
+        gamma: discount factor
+        lam: GAE lambda
+
+    Returns:
+        advantages: (bs, response_length) — whitened, broadcast to tokens
+        returns: (bs, response_length) — broadcast to tokens
+    """
+    with torch.no_grad():
+        batch_size = token_level_rewards.shape[0]
+        valid_lengths = response_mask.sum(dim=-1).long()  # (bs,)
+
+        # Extract per-turn scalar reward (sum over tokens, since reward is at last valid token)
+        turn_rewards = (token_level_rewards * response_mask).sum(dim=-1)  # (bs,)
+
+        # Extract per-turn scalar value (take first valid token since all are the same after broadcast)
+        turn_values = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
+        for i in range(batch_size):
+            if valid_lengths[i] > 0:
+                turn_values[i] = values[i, valid_lengths[i] - 1]
+
+        # Compute turn-level GAE grouped by episode
+        turn_advantages = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
+        turn_returns = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
+
+        unique_trajs = np.unique(traj_uids)
+        for traj_id in unique_trajs:
+            indices = np.where(traj_uids == traj_id)[0]  # turns in this episode, in temporal order
+            K = len(indices)
+            lastgaelam = 0.0
+
+            for t_rev in range(K - 1, -1, -1):
+                idx = indices[t_rev]
+                if t_rev < K - 1:
+                    next_idx = indices[t_rev + 1]
+                    next_value = turn_values[next_idx]
+                else:
+                    next_value = 0.0  # terminal state
+
+                delta = turn_rewards[idx] + gamma * next_value - turn_values[idx]
+                lastgaelam = delta + gamma * lam * lastgaelam
+                turn_advantages[idx] = lastgaelam
+                turn_returns[idx] = lastgaelam + turn_values[idx]
+
+        # Broadcast to token level
+        advantages = turn_advantages.unsqueeze(-1).expand_as(token_level_rewards) * response_mask
+        returns = turn_returns.unsqueeze(-1).expand_as(token_level_rewards) * response_mask
+
+        # Whiten advantages
+        advantages = verl_F.masked_whiten(advantages, response_mask)
+
+    return advantages, returns
+
+
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
@@ -480,6 +552,81 @@ def compute_policy_loss(
         cliprange_high = cliprange
     pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)  # - clip(ratio, 1-cliprange, 1+cliprange) * A
     clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)  # max(-ratio * A, -clip(ratio, 1-cliprange, 1+cliprange) * A)
+    pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+
+    pg_losses3 = -advantages * clip_ratio_c
+    clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+    pg_clipfrac_lower = verl_F.masked_mean(torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask)
+
+    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
+
+
+def compute_turn_level_policy_loss(
+    old_log_prob,
+    log_prob,
+    advantages,
+    response_mask,
+    is_mode="geometric",
+    cliprange=None,
+    cliprange_low=None,
+    cliprange_high=None,
+    clip_ratio_c=3.0,
+    loss_agg_mode: str = "token-mean",
+):
+    """Compute PPO clipped policy loss with turn-level IS ratio.
+
+    Three IS modes:
+      - "token": standard per-token IS (same as compute_policy_loss)
+      - "geometric": geometric mean of token IS ratios within a turn, broadcast to all tokens
+      - "product": product of token IS ratios within a turn, broadcast to all tokens
+
+    Args:
+        old_log_prob: (batch_size, response_length) old policy log-probs
+        log_prob: (batch_size, response_length) current policy log-probs
+        advantages: (batch_size, response_length) already turn-level broadcast advantages
+        response_mask: (batch_size, response_length)
+        is_mode: "geometric" | "product" | "token"
+        cliprange, cliprange_low, cliprange_high: PPO clip ranges
+        clip_ratio_c: dual-clip lower bound
+        loss_agg_mode: loss aggregation mode
+    """
+    assert clip_ratio_c > 1.0
+
+    if cliprange_low is None:
+        cliprange_low = cliprange
+    if cliprange_high is None:
+        cliprange_high = cliprange
+
+    token_log_ratio = log_prob - old_log_prob  # (bs, resp_len)
+    ppo_kl = verl_F.masked_mean(-token_log_ratio, response_mask)
+
+    if is_mode == "token":
+        ratio = torch.exp(token_log_ratio)
+    elif is_mode in ("geometric", "product"):
+        valid_lengths = response_mask.sum(dim=-1, keepdim=True).clamp(min=1)  # (bs, 1)
+        sum_log_ratio = (token_log_ratio * response_mask).sum(dim=-1, keepdim=True)  # (bs, 1)
+
+        if is_mode == "geometric":
+            turn_log_ratio = sum_log_ratio / valid_lengths
+        else:  # product
+            turn_log_ratio = sum_log_ratio
+
+        # Gradient flows through log_prob but turn_log_ratio is a function of all tokens.
+        # We need the gradient to flow back properly. Use the GSPO-style trick:
+        # log_ratio_with_grad = log_prob - log_prob.detach() + turn_log_ratio.detach()
+        # This ensures each token gets gradient proportional to its contribution.
+        turn_log_ratio_with_grad = log_prob - log_prob.detach() + turn_log_ratio.detach()
+        turn_log_ratio_with_grad = torch.clamp(turn_log_ratio_with_grad, max=10.0)
+        ratio = torch.exp(turn_log_ratio_with_grad)
+    else:
+        raise ValueError(f"Unknown IS mode: {is_mode}")
+
+    pg_losses1 = -advantages * ratio
+    pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+    clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
     pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
 
     pg_losses3 = -advantages * clip_ratio_c

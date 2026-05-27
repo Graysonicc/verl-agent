@@ -196,6 +196,8 @@ critic:
   grad_clip: 1.0
   cliprange_value: 0.5
   loss_agg_mode: ${actor_rollout_ref.actor.loss_agg_mode}
+  turn_level: ${algorithm.turn_level.enable}
+  turn_level_critic_loss_mode: ${algorithm.turn_level.critic_loss_mode}
   checkpoint:
     contents: ['model', 'optimizer', 'extra']  # with 'hf_model' you can save whole model as hf format, now only use sharded model checkpoint to save space
 
@@ -252,6 +254,12 @@ algorithm:
     mode: "mean_norm" # "mean_norm" or "mean_std_norm"
     enable_similarity: False # whether to use similarity-based anchor state grouping in GiGPO (supported for text-only tasks)
     similarity_thresh: 0.95 # similarity threshold for GiGPO (0.0, 1.0)
+  turn_level:
+    enable: False                  # Master switch for Turn-Level PPO
+    critic_mode: "last_token"     # Critic value extraction: "last_token" | "mean_pool"
+    is_mode: "geometric"          # IS ratio mode: "geometric" | "product" | "token"
+    adv_whiten: True              # Whether to whiten turn-level advantages
+    critic_loss_mode: "turn_only" # Critic loss: "turn_only" (last token only) | "all_tokens"
   filter_groups: # DAPO from https://arxiv.org/abs/2503.14476
     enable: False
     max_num_gen_batches: 10

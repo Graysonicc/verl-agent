@@ -29,7 +29,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, compute_policy_loss_gspo, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, compute_policy_loss_gspo, compute_turn_level_policy_loss, kl_penalty
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_name, get_torch_device, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -320,6 +320,7 @@ class DataParallelPPOActor(BasePPOActor):
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         multi_turn = data.meta_info.get("multi_turn", False)
+        turn_level_is_mode = data.meta_info.get("turn_level_is_mode", None)
 
         select_keys = ["responses", "input_ids", "attention_mask", "position_ids", "old_log_probs", "advantages"]
         if multi_turn:
@@ -388,24 +389,39 @@ class DataParallelPPOActor(BasePPOActor):
                     entropy, log_prob = self._forward_micro_batch(micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy)
                     
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-                    if loss_mode == "vanilla":
-                        policy_loss_fn = compute_policy_loss
-                    elif loss_mode == "gspo":
-                        policy_loss_fn = compute_policy_loss_gspo
-                    else:
-                        raise ValueError(f"Unsupported loss_mode: {loss_mode}")
 
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        cliprange=clip_ratio,
-                        cliprange_low=clip_ratio_low,
-                        cliprange_high=clip_ratio_high,
-                        clip_ratio_c=clip_ratio_c,
-                        loss_agg_mode=loss_agg_mode,
-                    )
+                    if turn_level_is_mode and turn_level_is_mode != "token":
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_turn_level_policy_loss(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            is_mode=turn_level_is_mode,
+                            cliprange=clip_ratio,
+                            cliprange_low=clip_ratio_low,
+                            cliprange_high=clip_ratio_high,
+                            clip_ratio_c=clip_ratio_c,
+                            loss_agg_mode=loss_agg_mode,
+                        )
+                    else:
+                        if loss_mode == "vanilla":
+                            policy_loss_fn = compute_policy_loss
+                        elif loss_mode == "gspo":
+                            policy_loss_fn = compute_policy_loss_gspo
+                        else:
+                            raise ValueError(f"Unsupported loss_mode: {loss_mode}")
+
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            cliprange=clip_ratio,
+                            cliprange_low=clip_ratio_low,
+                            cliprange_high=clip_ratio_high,
+                            clip_ratio_c=clip_ratio_c,
+                            loss_agg_mode=loss_agg_mode,
+                        )
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
