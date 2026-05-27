@@ -116,6 +116,7 @@ def compute_turn_level_gae(
     traj_uids: np.ndarray,
     gamma: float = 1.0,
     lam: float = 1.0,
+    step_indices: np.ndarray = None,
 ):
     """Compute turn-level GAE advantage and returns, then broadcast to token level.
 
@@ -130,6 +131,7 @@ def compute_turn_level_gae(
         traj_uids: (bs,) — episode identifier per turn
         gamma: discount factor
         lam: GAE lambda
+        step_indices: (bs,) — turn ordering within each episode (required after batch reordering)
 
     Returns:
         advantages: (bs, response_length) — whitened, broadcast to tokens
@@ -142,7 +144,7 @@ def compute_turn_level_gae(
         # Extract per-turn scalar reward (sum over tokens, since reward is at last valid token)
         turn_rewards = (token_level_rewards * response_mask).sum(dim=-1)  # (bs,)
 
-        # Extract per-turn scalar value (take first valid token since all are the same after broadcast)
+        # Extract per-turn scalar value (take last valid token since all are the same after broadcast)
         turn_values = torch.zeros(batch_size, device=values.device, dtype=values.dtype)
         for i in range(batch_size):
             if valid_lengths[i] > 0:
@@ -154,7 +156,14 @@ def compute_turn_level_gae(
 
         unique_trajs = np.unique(traj_uids)
         for traj_id in unique_trajs:
-            indices = np.where(traj_uids == traj_id)[0]  # turns in this episode, in temporal order
+            mask = (traj_uids == traj_id)
+            indices = np.where(mask)[0]
+
+            # Sort by step_index to restore temporal order (critical after batch reordering)
+            if step_indices is not None:
+                sort_order = np.argsort(step_indices[indices])
+                indices = indices[sort_order]
+
             K = len(indices)
             lastgaelam = 0.0
 

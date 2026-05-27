@@ -94,6 +94,7 @@ class AdvantageEstimator(str, Enum):
     RLOO = "rloo"
     GRPO_PASSK = "grpo_passk"
     GiGPO = 'gigpo'
+    TURN_LEVEL_GAE = "turn_level_gae"
 
 
 @dataclass
@@ -357,6 +358,19 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             )
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
+    elif adv_estimator == AdvantageEstimator.TURN_LEVEL_GAE:
+        step_indices = data.non_tensor_batch.get("step_index", None)
+        advantages, returns = core_algos.compute_turn_level_gae(
+            token_level_rewards=data.batch["token_level_rewards"],
+            values=data.batch["values"],
+            response_mask=data.batch["response_mask"],
+            traj_uids=data.non_tensor_batch["traj_uid"],
+            gamma=gamma,
+            lam=lam,
+            step_indices=step_indices,
+        )
+        data.batch["advantages"] = advantages
+        data.batch["returns"] = returns
     else:
         raise NotImplementedError
     return data
@@ -442,7 +456,7 @@ class RayPPOTrainer:
         if config.algorithm.use_kl_in_reward:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(config.algorithm.kl_ctrl)
 
-        if self.config.algorithm.adv_estimator == AdvantageEstimator.GAE:
+        if self.config.algorithm.adv_estimator in [AdvantageEstimator.GAE, AdvantageEstimator.TURN_LEVEL_GAE]:
             self.use_critic = True
         elif self.config.algorithm.adv_estimator in [
             AdvantageEstimator.GRPO,
@@ -1247,6 +1261,9 @@ class RayPPOTrainer:
                         # update actor
                         with _timer("update_actor", timing_raw):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            turn_level_cfg = self.config.algorithm.get("turn_level", {})
+                            if turn_level_cfg.get("enable", False):
+                                batch.meta_info["turn_level_is_mode"] = turn_level_cfg.get("is_mode", "token")
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

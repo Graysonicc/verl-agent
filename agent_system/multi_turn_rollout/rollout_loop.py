@@ -261,6 +261,7 @@ class TrajectoryCollector:
         effective_batch = []
         for bs in range(batch_size):
             # sum the rewards for each data in total_batch_list[bs]
+            step_index = 0
             for data in total_batch_list[bs]:
                 assert traj_uid[bs] == data['traj_uid'], "data is not from the same trajectory"
                 if data['active_masks']:
@@ -270,6 +271,9 @@ class TrajectoryCollector:
                     data['episode_lengths'] = episode_lengths[bs]
                     # tool_callings
                     data['tool_callings'] = tool_callings[bs]
+                    # step_index within episode (for turn-level GAE ordering)
+                    data['step_index'] = step_index
+                    step_index += 1
                     # success_rate
                     for key, value in success_rate.items():
                         data[key] = value
