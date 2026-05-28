@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import uuid
 import torch
 import numpy as np
 import random
@@ -122,6 +123,14 @@ def adjust_batch(config, data: DataProto, mode="copy") -> DataProto:
         to_add = size_divisor - remainder
         dup_indices = np.random.choice(bs, to_add, replace=False)
         dup_proto = data.select_idxs(dup_indices)
+
+        # Assign unique traj_uids to duplicated samples so they form
+        # independent single-turn "episodes" and don't corrupt the
+        # temporal structure of the original episodes in turn-level GAE.
+        if "traj_uid" in dup_proto.non_tensor_batch:
+            dup_proto.non_tensor_batch["traj_uid"] = np.array(
+                [str(uuid.uuid4()) for _ in range(to_add)], dtype=object
+            )
 
         adjusted_batch = DataProto.concat([data, dup_proto])
     else:

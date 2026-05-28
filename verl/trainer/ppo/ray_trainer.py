@@ -359,6 +359,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch['advantages'] = advantages
         data.batch['returns'] = returns
     elif adv_estimator == AdvantageEstimator.TURN_LEVEL_GAE:
+        step_indices = data.non_tensor_batch.get("step_index", None)
         advantages, returns = core_algos.compute_turn_level_gae(
             token_level_rewards=data.batch["token_level_rewards"],
             values=data.batch["values"],
@@ -366,6 +367,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             traj_uids=data.non_tensor_batch["traj_uid"],
             gamma=gamma,
             lam=lam,
+            step_indices=step_indices,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1221,7 +1223,7 @@ class RayPPOTrainer:
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
-                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty)
+                            batch, kl_metrics = apply_kl_penalty(batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty, multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable)
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
